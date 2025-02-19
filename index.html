@@ -7,7 +7,7 @@
     <script>
         async function fetchParticipants() {
             try {
-                const response = await fetch("http://20.168.192.4/api/participants", {
+                const response = await fetch("http://20.168.192.4/api/admin/status/v1/participant/", {
                     method: "GET",
                     headers: {
                         "Authorization": "Basic " + btoa("admin:Cnmrw002ra."),
