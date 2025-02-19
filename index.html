@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pexip VMR Participants</title>
+    <script>
+        async function fetchParticipants() {
+            try {
+                const response = await fetch("http://20.168.192.4/api/participants", {
+                    method: "GET",
+                    headers: {
+                        "Authorization": "Basic " + btoa("admin:Cnmrw002ra."),
+                        "Content-Type": "application/json"
+                    }
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! Status: ${response.status}`);
+                }
+                
+                const data = await response.json();
+                const list = document.getElementById("participants-list");
+                list.innerHTML = "";
+                
+                data.forEach(vmr => {
+                    const li = document.createElement("li");
+                    li.textContent = `${vmr.display_name} - ${vmr.status}`;
+                    list.appendChild(li);
+                });
+            } catch (error) {
+                console.error("Error fetching participants:", error);
+            }
+        }
+
+        document.addEventListener("DOMContentLoaded", () => {
+            fetchParticipants();
+            setInterval(fetchParticipants, 10000);
+        });
+    </script>
+</head>
+<body>
+    <h1>Pexip VMR Participants</h1>
+    <ul id="participants-list"></ul>
+</body>
+</html>
