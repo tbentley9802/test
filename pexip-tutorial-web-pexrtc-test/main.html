@@ -1,0 +1,239 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Pexip VMR on Meta Quest / Browser</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <style>
+    body { margin:0; font-family: Arial, sans-serif; background:#111; color:#eee; padding:12px; }
+    #controls { padding:12px; background:#222; display:flex; gap:8px; flex-wrap: wrap; align-items:center; border-radius:6px; }
+    input, button { padding:8px; font-size:1rem; border-radius:6px; border:none; }
+    button { background:#0a84ff; color:#fff; cursor:pointer; }
+    #videos { display:flex; flex-direction:column; gap:6px; margin-top:8px; position:relative; }
+    video { width:100%; height:auto; background:#000; border-radius:6px; }
+    #localVideo { width:140px; position:absolute; bottom:8px; right:8px; border:2px solid #0af; border-radius:4px; }
+    #log { max-height:160px; overflow:auto; font-size:11px; background:#1e1e1e; padding:6px; margin:6px 0; border-radius:6px; }
+    #errors { color:#ff5f5f; padding:6px; }
+    .small { font-size:0.8rem; }
+    label { display:flex; flex-direction: column; gap:2px; }
+  </style>
+</head>
+<body>
+  <h2 style="margin-top:0;">Minimal Pexip VMR Client</h2>
+
+  <div id="controls">
+    <label class="small">Name:
+      <input id="name" name="displayName" autocomplete="name" value="QuestUser" />
+    </label>
+    <label class="small">Conference:
+      <input id="conference" name="conference" autocomplete="off" value="vmr1" />
+    </label>
+    <label class="small">Node:
+      <input id="node" name="node" autocomplete="off" value="edge1.bentleylab.net" />
+    </label>
+    <button id="joinBtn">Join</button>
+    <button id="leaveBtn">Leave</button>
+  </div>
+
+  <div id="errors"></div>
+  <div id="videos">
+    <video id="remoteVideo" autoplay playsinline></video>
+    <video id="localVideo" autoplay muted playsinline></video>
+  </div>
+  <div id="log"><strong>Log:</strong></div>
+
+  <!-- Diagnostic: catch synchronous XHR usage -->
+  <script>
+    (function() {
+      const origOpen = XMLHttpRequest.prototype.open;
+      XMLHttpRequest.prototype.open = function(method, url, async, ...rest) {
+        if (async === false) {
+          console.warn('Synchronous XHR detected (should be fixed upstream):', method, url);
+        }
+        return origOpen.call(this, method, url, async, ...rest);
+      };
+    })();
+  </script>
+
+  <!-- Wrapper to expose/intercept underlying RTCPeerConnection for ICE debugging -->
+  <script>
+    (function() {
+      const OriginalPC = window.RTCPeerConnection;
+      window.__lastPexipPC = null;
+      function WrappedPC(...args) {
+        const pc = new OriginalPC(...args);
+        window.__lastPexipPC = pc;
+        pc.addEventListener('iceconnectionstatechange', () => {
+          console.log('[WrappedPC] ICE state:', pc.iceConnectionState);
+        });
+        pc.addEventListener('connectionstatechange', () => {
+          console.log('[WrappedPC] connection state:', pc.connectionState);
+        });
+        // you can also log candidate events if needed
+        pc.addEventListener('icecandidate', e => {
+          console.log('[WrappedPC] icecandidate', e.candidate);
+        });
+        return pc;
+      }
+      WrappedPC.prototype = OriginalPC.prototype;
+      WrappedPC.generateCertificate = OriginalPC.generateCertificate?.bind(OriginalPC);
+      window.RTCPeerConnection = WrappedPC;
+    })();
+  </script>
+
+  <!-- PexRTC JS from your edge node -->
+  <script src="https://edge1.bentleylab.net/static/webrtc/js/pexrtc.js"></script>
+  <script>
+    let rtc;
+    let call;
+
+    function appendLog(...args) {
+      const container = document.getElementById('log');
+      const line = document.createElement('div');
+      const serialized = args.map(a => {
+        if (a instanceof Error) return a.toString();
+        if (typeof a === 'object') {
+          try { return JSON.stringify(a); }
+          catch (_) {
+            if (a && a.constructor && a.constructor.name) return `<${a.constructor.name}>`;
+            return String(a);
+          }
+        }
+        return a;
+      }).join(' ');
+      line.textContent = new Date().toISOString() + ' – ' + serialized;
+      container.appendChild(line);
+      container.scrollTop = container.scrollHeight;
+      console.log(...args);
+    }
+
+    function showError(msg) {
+      document.getElementById('errors').textContent = msg;
+      appendLog('ERROR:', msg);
+    }
+
+    function attachLocalStream(stream) {
+      appendLog('Local stream ready', {
+        videoTracks: stream.getVideoTracks().map(t => t.label),
+        audioTracks: stream.getAudioTracks().map(t => t.label)
+      });
+      const lv = document.getElementById('localVideo');
+      if ('srcObject' in lv) lv.srcObject = stream;
+      else lv.src = URL.createObjectURL(stream);
+      lv.play().catch(e => appendLog('localVideo play error', e));
+      stream.getTracks().forEach(t => appendLog('Local track:', t.kind, 'state:', t.readyState));
+    }
+
+    function attachRemoteStream(stream) {
+      appendLog('Remote stream arrived', {
+        videoTracks: stream.getVideoTracks().map(t => t.label),
+        audioTracks: stream.getAudioTracks().map(t => t.label)
+      });
+      const rv = document.getElementById('remoteVideo');
+      if ('srcObject' in rv) rv.srcObject = stream;
+      else rv.src = URL.createObjectURL(stream);
+      rv.play().catch(e => appendLog('remoteVideo play error', e));
+      stream.getTracks().forEach(t => appendLog('Remote track:', t.kind, 'state:', t.readyState));
+    }
+
+    document.getElementById('joinBtn').onclick = () => {
+      document.getElementById('errors').textContent = '';
+      const name = document.getElementById('name').value.trim();
+      const conference = document.getElementById('conference').value.trim();
+      const node = document.getElementById('node').value.trim();
+      if (!name || !conference || !node) {
+        showError('Missing required fields');
+        return;
+      }
+      appendLog(`Joining conference '${conference}' on node '${node}' as '${name}'`);
+
+      try {
+        rtc = new PexRTC();
+
+        rtc.onError = e => showError('PexRTC error: ' + e);
+        rtc.onDisconnect = reason => appendLog('Disconnected:', reason);
+        rtc.onConnect = () => appendLog('Signaling connected');
+
+        // 1. Create call structure early
+        rtc.makeCall(node, conference, name);
+        rtc.addCall('video');
+        call = rtc.call;
+        if (!call) {
+          showError('Call object missing after addCall.');
+          return;
+        }
+
+        // 2. Remote stream hookup
+        if (typeof call.onRemoteStream === 'function') {
+          call.onRemoteStream = attachRemoteStream;
+          appendLog('Hooked call.onRemoteStream');
+        } else if (typeof rtc.onRemoteStream === 'function') {
+          rtc.onRemoteStream = attachRemoteStream;
+          appendLog('Hooked rtc.onRemoteStream');
+        } else if (typeof call.onConnect === 'function') {
+          call.onConnect = (stream) => {
+            appendLog('Fallback onConnect received remote stream');
+            attachRemoteStream(stream);
+          };
+          appendLog('Using call.onConnect fallback');
+        } else {
+          appendLog('No remote stream handler detected upfront.');
+        }
+
+        // 3. Local media setup
+        rtc.onSetup = (localStream) => {
+          appendLog('onSetup fired (local stream ready)');
+          attachLocalStream(localStream);
+
+          // If explicit attach API exists, use it
+          if (call) {
+            if (typeof call.setLocalStream === 'function') {
+              call.setLocalStream(localStream);
+              appendLog('Explicitly set local stream');
+            } else if (typeof call.attachLocalStream === 'function') {
+              call.attachLocalStream(localStream);
+              appendLog('Explicitly attached local stream');
+            }
+          }
+
+          // ICE diagnostics (wrapped PC will log automatically too)
+          if (call && call.peerConnection) {
+            const pc = call.peerConnection;
+            pc.addEventListener('iceconnectionstatechange', () => {
+              appendLog('ICE state:', pc.iceConnectionState);
+            });
+            pc.getReceivers().forEach(r => appendLog('Receiver track:', r.track && r.track.kind));
+          } else {
+            appendLog('PeerConnection not exposed for ICE debugging via call object.');
+          }
+
+          // Expose raw PC if wrapper caught it
+          if (window.__lastPexipPC) {
+            appendLog('Wrapped underlying RTCPeerConnection state:', {
+              iceConnectionState: window.__lastPexipPC.iceConnectionState,
+              connectionState: window.__lastPexipPC.connectionState
+            });
+          }
+        };
+      } catch (err) {
+        showError('Exception: ' + err);
+      }
+    };
+
+    document.getElementById('leaveBtn').onclick = () => {
+      if (rtc) {
+        rtc.disconnect();
+        appendLog('Left conference');
+      }
+    };
+
+    // Recommend fullscreen on Quest
+    window.addEventListener('load', () => {
+      const ua = navigator.userAgent.toLowerCase();
+      if (ua.includes('oculus') || ua.includes('quest')) {
+        appendLog('Meta Quest detected. Fullscreen is recommended for best experience.');
+      }
+    });
+  </script>
+</body>
+</html>
